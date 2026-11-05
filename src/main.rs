@@ -1,5 +1,6 @@
 mod app;
 mod color_ui;
+mod fetch;
 mod theme;
 
 fn main() -> eframe::Result {

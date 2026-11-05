@@ -1,13 +1,12 @@
 use std::sync::mpsc::{Receiver, channel};
 
 use eframe::egui::{self, RichText, TextureHandle, TextureOptions};
-use pokepicker::api::{Client, Pokemon};
+use pokepicker::api::Pokemon;
 use pokepicker::color::Rgb;
 
 use crate::color_ui::{ColorSearch, Event};
+use crate::fetch;
 use crate::theme;
-
-type FetchResult = anyhow::Result<(Pokemon, egui::ColorImage)>;
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
@@ -28,7 +27,7 @@ pub struct App {
     status: String,
     error: bool,
     current: Option<Loaded>,
-    pending: Option<Receiver<FetchResult>>,
+    pending: Option<Receiver<fetch::Lookup>>,
     color: ColorSearch,
 }
 
@@ -47,13 +46,12 @@ impl Default for App {
 }
 
 impl App {
-    /// Kick off a fetch on a worker thread; results are picked up in `poll`.
+    /// Start a lookup in the background; the result is picked up in `poll`.
     fn fetch(&mut self, ctx: &egui::Context) {
-        let query = self.query.clone();
         let ctx = ctx.clone();
         let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(fetch_with_sprite(&query));
+        fetch::lookup(&self.query, move |result| {
+            let _ = tx.send(result);
             ctx.request_repaint();
         });
         self.pending = Some(rx);
@@ -283,14 +281,4 @@ fn pixel_at(image: &egui::ColorImage, rect: egui::Rect, pos: egui::Pos2) -> Opti
     let y = ((uv.y * h as f32) as usize).min(h - 1);
     let [r, g, b, a] = image.pixels[y * w + x].to_srgba_unmultiplied();
     (a >= 128).then_some([r, g, b])
-}
-
-fn fetch_with_sprite(query: &str) -> FetchResult {
-    let client = Client::new()?;
-    let mon = client.pokemon(query)?;
-    let bytes = client.sprite(&mon)?;
-    let rgba = image::load_from_memory(&bytes)?.to_rgba8();
-    let size = [rgba.width() as usize, rgba.height() as usize];
-    let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-    Ok((mon, image))
 }

@@ -12,6 +12,17 @@ pub const BASE_URL: &str = "https://pokeapi.co/api/v2";
 pub const SPRITE_BASE_URL: &str =
     "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon";
 
+pub const USER_AGENT: &str = concat!("pokepicker/", env!("CARGO_PKG_VERSION"));
+
+/// PokeAPI keys are lowercase names or numeric ids.
+pub fn pokemon_key(name_or_id: &str) -> String {
+    name_or_id.trim().to_lowercase()
+}
+
+pub fn pokemon_url(key: &str) -> String {
+    format!("{BASE_URL}/pokemon/{key}")
+}
+
 pub fn sprite_url(id: u32) -> String {
     format!("{SPRITE_BASE_URL}/{id}.png")
 }
@@ -71,15 +82,15 @@ pub struct Client {
 impl Client {
     pub fn new() -> Result<Self> {
         let http = reqwest::blocking::Client::builder()
-            .user_agent(concat!("pokepicker/", env!("CARGO_PKG_VERSION")))
+            .user_agent(USER_AGENT)
             .build()?;
         Ok(Self { http })
     }
 
     /// GET /pokemon/{name_or_id}
     pub fn pokemon(&self, name_or_id: &str) -> Result<Pokemon> {
-        let key = name_or_id.trim().to_lowercase();
-        let url = format!("{BASE_URL}/pokemon/{key}");
+        let key = pokemon_key(name_or_id);
+        let url = pokemon_url(&key);
         self.http
             .get(&url)
             .send()?
