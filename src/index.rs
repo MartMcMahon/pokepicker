@@ -108,16 +108,42 @@ pub struct BuildReport {
 pub struct Index {
     format: u32,
     pub entries: Vec<Entry>,
+    /// Each palette colour converted to Lab, parallel to `entries[i].palette`.
+    /// Derived data: computed once on creation/load rather than on every search.
+    #[serde(skip)]
+    labs: Vec<Vec<Lab>>,
 }
 
 impl Index {
+    pub fn new(entries: Vec<Entry>) -> Self {
+        let mut index = Index {
+            format: FORMAT,
+            entries,
+            labs: Vec::new(),
+        };
+        index.prepare();
+        index
+    }
+
+    fn prepare(&mut self) {
+        self.labs = self
+            .entries
+            .iter()
+            .map(|e| e.palette.iter().map(|s| Lab::from_rgb(s.rgb)).collect())
+            .collect();
+    }
+
     /// The saved index, or `None` if there isn't one (or it's from an older format).
     pub fn load(store: &Store) -> Result<Option<Self>> {
         let Ok(bytes) = std::fs::read(store.index_path()) else {
             return Ok(None);
         };
-        let index: Index = serde_json::from_slice(&bytes).context("corrupt index.json")?;
-        Ok((index.format == FORMAT).then_some(index))
+        let mut index: Index = serde_json::from_slice(&bytes).context("corrupt index.json")?;
+        if index.format != FORMAT {
+            return Ok(None);
+        }
+        index.prepare();
+        Ok(Some(index))
     }
 
     fn save(&self, store: &Store) -> Result<()> {
@@ -150,10 +176,7 @@ impl Index {
 
         let mut entries = entries.into_inner().unwrap();
         entries.sort_by_key(|e| e.id);
-        let index = Index {
-            format: FORMAT,
-            entries,
-        };
+        let index = Index::new(entries);
         index.save(store)?;
         Ok(BuildReport {
             index,
@@ -161,27 +184,33 @@ impl Index {
         })
     }
 
-    /// Pokemon whose sprites contain colours near `target`, best first.
+    /// Pokemon whose sprites contain colours near `target`, best first;
+    /// equal scores are ordered by pokedex number.
     ///
     /// `tolerance` is the ΔE radius. A palette colour counts fully at distance 0
     /// and fades to nothing at `tolerance` along `1 - (d/tol)²`, so anything
     /// inside the radius still counts substantially and coverage dominates.
+    ///
+    /// Works in squared distances throughout: `(d/tol)²` is `d²/tol²`, so the
+    /// square root in ΔE is never needed.
     pub fn search(&self, target: Rgb, tolerance: f32) -> Vec<Match> {
         let target = Lab::from_rgb(target);
+        let tol2 = tolerance * tolerance;
         let mut matches: Vec<Match> = self
             .entries
             .iter()
-            .filter_map(|entry| {
+            .zip(&self.labs)
+            .filter_map(|(entry, labs)| {
                 let (mut weighted, mut within) = (0.0, 0);
                 let mut closest = (f32::MAX, [0; 3]);
-                for swatch in &entry.palette {
-                    let d = target.delta_e(Lab::from_rgb(swatch.rgb));
-                    if d < tolerance {
-                        weighted += swatch.count as f32 * (1.0 - (d / tolerance).powi(2));
+                for (swatch, &lab) in entry.palette.iter().zip(labs) {
+                    let d2 = target.delta_e_squared(lab);
+                    if d2 < tol2 {
+                        weighted += swatch.count as f32 * (1.0 - d2 / tol2);
                         within += swatch.count;
                     }
-                    if d < closest.0 {
-                        closest = (d, swatch.rgb);
+                    if d2 < closest.0 {
+                        closest = (d2, swatch.rgb);
                     }
                 }
                 let score = weighted / entry.pixels as f32;
@@ -194,7 +223,7 @@ impl Index {
                 })
             })
             .collect();
-        matches.sort_by(|a, b| b.score.total_cmp(&a.score));
+        matches.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
         matches
     }
 }
@@ -274,21 +303,126 @@ mod tests {
     #[test]
     fn search_ranks_by_closeness_and_coverage() {
         let yellow = [250, 210, 40];
-        let index = Index {
-            format: FORMAT,
-            entries: vec![
-                entry(1, &[([40, 80, 200], 90), ([20, 20, 20], 10)]), // blue: no match
-                entry(2, &[(yellow, 30), ([20, 20, 20], 70)]),        // a little yellow
-                entry(3, &[(yellow, 80), ([20, 20, 20], 20)]),        // mostly yellow
-                entry(4, &[([245, 200, 50], 80), ([20, 20, 20], 20)]), // mostly near-yellow
-            ],
-        };
+        let index = Index::new(vec![
+            entry(1, &[([40, 80, 200], 90), ([20, 20, 20], 10)]), // blue: no match
+            entry(2, &[(yellow, 30), ([20, 20, 20], 70)]),        // a little yellow
+            entry(3, &[(yellow, 80), ([20, 20, 20], 20)]),        // mostly yellow
+            entry(4, &[([245, 200, 50], 80), ([20, 20, 20], 20)]), // mostly near-yellow
+        ]);
         let ids: Vec<_> = index
             .search([255, 215, 30], 20.0)
             .iter()
             .map(|m| m.id)
             .collect();
         assert_eq!(ids, [3, 4, 2]);
+    }
+
+    #[test]
+    fn equal_scores_are_ordered_by_id() {
+        let pal = [([250, 210, 40], 50), ([20, 20, 20], 50)];
+        let index = Index::new(vec![entry(30, &pal), entry(10, &pal), entry(20, &pal)]);
+        let ids: Vec<_> = index
+            .search([250, 210, 40], 20.0)
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, [10, 20, 30]);
+    }
+
+    /// The original search: converts every swatch to Lab per search and uses
+    /// true ΔE with a square root. Kept as the reference for `search`.
+    fn reference_search(index: &Index, target: Rgb, tolerance: f32) -> Vec<Match> {
+        let target = Lab::from_rgb(target);
+        index
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let (mut weighted, mut within) = (0.0, 0);
+                let mut closest = (f32::MAX, [0; 3]);
+                for swatch in &entry.palette {
+                    let d = target.delta_e(Lab::from_rgb(swatch.rgb));
+                    if d < tolerance {
+                        weighted += swatch.count as f32 * (1.0 - (d / tolerance).powi(2));
+                        within += swatch.count;
+                    }
+                    if d < closest.0 {
+                        closest = (d, swatch.rgb);
+                    }
+                }
+                let score = weighted / entry.pixels as f32;
+                (score >= MIN_SCORE).then(|| Match {
+                    id: entry.id,
+                    name: entry.name.clone(),
+                    score,
+                    coverage: within as f32 / entry.pixels as f32,
+                    closest: closest.1,
+                })
+            })
+            .collect()
+    }
+
+    /// Sprite-shaped fixture: a dark outline plus 4-30 colours with skewed
+    /// pixel counts, from a fixed-seed generator so the test is deterministic.
+    /// Every 10th entry duplicates its predecessor's palette to create ties.
+    fn fixture() -> Index {
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let mut entries: Vec<Entry> = Vec::new();
+        for id in 1..=400 {
+            let mut pal = vec![([16, 16, 24], 80 + next() % 120)];
+            if id % 10 == 0 {
+                let prev = entries.last().unwrap();
+                pal = prev.palette.iter().map(|s| (s.rgb, s.count)).collect();
+            } else {
+                for i in 0..4 + next() % 27 {
+                    let [r, g, b, _] = next().to_le_bytes();
+                    pal.push(([r, g, b], 1 + next() % (600 / (i + 1))));
+                }
+            }
+            entries.push(entry(id, &pal));
+        }
+        Index::new(entries)
+    }
+
+    #[test]
+    fn search_matches_reference_implementation() {
+        let index = fixture();
+        let steps = [0u8, 51, 102, 153, 204, 255];
+        for r in steps {
+            for g in steps {
+                for b in steps {
+                    for tol in [5.0, 12.0, 20.0, 35.0, 50.0] {
+                        let target = [r, g, b];
+                        let fast = index.search(target, tol);
+                        let reference = reference_search(&index, target, tol);
+
+                        let mut fast_ids: Vec<_> = fast.iter().map(|m| m.id).collect();
+                        let mut ref_ids: Vec<_> = reference.iter().map(|m| m.id).collect();
+                        fast_ids.sort();
+                        ref_ids.sort();
+                        assert_eq!(fast_ids, ref_ids, "result set for {target:?} tol {tol}");
+
+                        for m in &fast {
+                            let r = reference.iter().find(|x| x.id == m.id).unwrap();
+                            assert!((m.score - r.score).abs() < 1e-5, "score for {}", m.id);
+                            assert_eq!(m.coverage, r.coverage);
+                            assert_eq!(m.closest, r.closest);
+                        }
+
+                        // Best first, ties by id.
+                        assert!(fast.windows(2).all(|w| {
+                            w[0].score > w[1].score
+                                || (w[0].score == w[1].score && w[0].id < w[1].id)
+                        }));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

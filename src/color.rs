@@ -47,8 +47,13 @@ impl Lab {
     }
 
     pub fn delta_e(self, other: Lab) -> f32 {
+        self.delta_e_squared(other).sqrt()
+    }
+
+    /// ΔE², for comparisons where the square root isn't needed.
+    pub fn delta_e_squared(self, other: Lab) -> f32 {
         let (dl, da, db) = (self.l - other.l, self.a - other.a, self.b - other.b);
-        (dl * dl + da * da + db * db).sqrt()
+        dl * dl + da * da + db * db
     }
 }
 
