@@ -1,6 +1,6 @@
 //! Package the colour index and every sprite for the web build.
 //!
-//!     cargo run --release --example bundle [out_dir]
+//!     cargo run --release --bin bundle [out_dir]
 //!
 //! Writes `index.json`, `sprites.json` and `sprites.bin` to `out_dir`
 //! (default `web-data/`). Uses the desktop sprite cache, building it first if

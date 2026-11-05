@@ -2,6 +2,8 @@
 name = "pokepicker"
 version = "0.1.0"
 edition = "2024"
+# With a second binary in src/bin/, plain `cargo run` needs to know which to run.
+default-run = "pokepicker"
 
 [dependencies]
 anyhow = "1.0.104"
