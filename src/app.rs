@@ -31,8 +31,8 @@ pub struct App {
     color: ColorSearch,
 }
 
-impl Default for App {
-    fn default() -> Self {
+impl App {
+    pub fn new(ctx: &egui::Context) -> Self {
         Self {
             tab: Tab::Color,
             query: "pikachu".into(),
@@ -40,12 +40,10 @@ impl Default for App {
             error: false,
             current: None,
             pending: None,
-            color: ColorSearch::default(),
+            color: ColorSearch::new(ctx),
         }
     }
-}
 
-impl App {
     /// Start a lookup in the background; the result is picked up in `poll`.
     fn fetch(&mut self, ctx: &egui::Context) {
         let ctx = ctx.clone();
@@ -99,6 +97,8 @@ impl App {
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
+            // A web page can't close its own tab.
+            #[cfg(not(target_arch = "wasm32"))]
             ui.menu_button("FILE", |ui| {
                 if ui.button("QUIT").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -112,15 +112,19 @@ impl App {
                 if ui.button("CLEAR").clicked() {
                     self.current = None;
                 }
-                ui.separator();
-                let building = self.color.is_building();
-                if ui
-                    .add_enabled(!building, egui::Button::new("REBUILD COLOR INDEX"))
-                    .clicked()
+                // The web build uses the bundled index; only desktop can rebuild.
+                #[cfg(not(target_arch = "wasm32"))]
                 {
-                    self.tab = Tab::Color;
-                    if let Some(event) = self.color.start_build(ui.ctx()) {
-                        self.handle(ui.ctx(), event);
+                    ui.separator();
+                    let busy = self.color.is_busy();
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("REBUILD COLOR INDEX"))
+                        .clicked()
+                    {
+                        self.tab = Tab::Color;
+                        if let Some(event) = self.color.start_build(ui.ctx()) {
+                            self.handle(ui.ctx(), event);
+                        }
                     }
                 }
             });
@@ -246,7 +250,7 @@ impl eframe::App for App {
                         } else {
                             theme::INK
                         };
-                        let busy = self.pending.is_some() || self.color.is_building();
+                        let busy = self.pending.is_some() || self.color.is_busy();
                         let cursor = if busy { " …" } else { " ▼" };
                         ui.label(RichText::new(format!("{}{cursor}", self.status)).color(color));
                     });

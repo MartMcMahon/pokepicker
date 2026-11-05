@@ -1,17 +1,14 @@
 //! The COLOR MATCH tab: pick a colour, see which pokemon wear it.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, channel};
-use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText, TextureHandle, TextureOptions};
 use egui::color_picker::{Alpha, color_picker_color32};
-use pokepicker::api::Client;
 use pokepicker::color::{Rgb, parse_hex, to_hex};
-use pokepicker::index::{BuildReport, Index, Match, Progress, Store};
+use pokepicker::index::{Index, Match};
 
+use crate::data::Sprites;
 use crate::theme;
 
 /// Result tiles shown at once; past this the matches are too weak to be interesting.
@@ -34,14 +31,23 @@ pub enum Event {
     },
 }
 
+type Loaded = anyhow::Result<(Index, Sprites)>;
+
+/// A background sprite download + index build (desktop only).
+#[cfg(not(target_arch = "wasm32"))]
 struct Build {
-    progress: Arc<Progress>,
-    rx: Receiver<anyhow::Result<BuildReport>>,
+    progress: std::sync::Arc<pokepicker::index::Progress>,
+    rx: Receiver<anyhow::Result<pokepicker::index::BuildReport>>,
 }
 
 pub struct ColorSearch {
-    store: Option<Store>,
     index: Option<Index>,
+    sprites: Option<Sprites>,
+    /// The web bundle on its way in.
+    loading: Option<Receiver<Loaded>>,
+    /// Why the index isn't available, if it failed to load.
+    load_error: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
     build: Option<Build>,
     target: Color32,
     hex: String,
@@ -52,14 +58,15 @@ pub struct ColorSearch {
     thumbs: HashMap<u32, Option<TextureHandle>>,
 }
 
-impl Default for ColorSearch {
-    fn default() -> Self {
-        let store = Store::default_location().ok();
-        let index = store.as_ref().and_then(|s| Index::load(s).ok().flatten());
+impl ColorSearch {
+    pub fn new(ctx: &egui::Context) -> Self {
         let target = Color32::from_rgb(0xf8, 0xd0, 0x30);
-        Self {
-            store,
-            index,
+        let mut this = Self {
+            index: None,
+            sprites: None,
+            loading: None,
+            load_error: None,
+            #[cfg(not(target_arch = "wasm32"))]
             build: None,
             target,
             hex: to_hex(rgb(target)),
@@ -67,23 +74,67 @@ impl Default for ColorSearch {
             results: Vec::new(),
             stale: true,
             thumbs: HashMap::new(),
-        }
-    }
-}
+        };
 
-impl ColorSearch {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = ctx;
+            (this.index, this.sprites) = crate::data::load_cache();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let (tx, rx) = channel();
+            let ctx = ctx.clone();
+            crate::data::load_bundle(move |loaded| {
+                let _ = tx.send(loaded);
+                ctx.request_repaint();
+            });
+            this.loading = Some(rx);
+        }
+        this
+    }
+
     pub fn set_target(&mut self, color: Rgb) {
         self.target = Color32::from_rgb(color[0], color[1], color[2]);
         self.hex = to_hex(color);
         self.stale = true;
     }
 
-    pub fn is_building(&self) -> bool {
-        self.build.is_some()
+    pub fn is_busy(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.build.is_some() {
+            return true;
+        }
+        self.loading.is_some()
+    }
+
+    fn poll_loading(&mut self) -> Option<Event> {
+        let loaded = self.loading.as_ref()?.try_recv().ok()?;
+        self.loading = None;
+        Some(match loaded {
+            Ok((index, sprites)) => {
+                let n = index.entries.len();
+                (self.index, self.sprites) = (Some(index), Some(sprites));
+                self.stale = true;
+                Event::Status {
+                    text: format!("{n} Pokémon ready. Pick a color!"),
+                    error: false,
+                }
+            }
+            Err(e) => {
+                let text = format!("Oops! Couldn't load Pokémon data: {e:#}");
+                self.load_error = Some(text.clone());
+                Event::Status { text, error: true }
+            }
+        })
     }
 
     /// Download any missing sprites and (re)build the colour index in the background.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start_build(&mut self, ctx: &egui::Context) -> Option<Event> {
+        use pokepicker::api::Client;
+        use pokepicker::index::{Progress, Store};
+
         if self.build.is_some() {
             return None;
         }
@@ -93,7 +144,7 @@ impl ColorSearch {
                 error: true,
             });
         };
-        let progress = Arc::new(Progress::default());
+        let progress = std::sync::Arc::new(Progress::default());
         let (tx, rx) = channel();
         let (p, ctx) = (progress.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -108,6 +159,7 @@ impl ColorSearch {
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn poll_build(&mut self) -> Option<Event> {
         let result = self.build.as_ref()?.rx.try_recv().ok()?;
         self.build = None;
@@ -115,6 +167,9 @@ impl ColorSearch {
             Ok(report) => {
                 let n = report.index.entries.len();
                 self.index = Some(report.index);
+                if self.sprites.is_none() {
+                    (_, self.sprites) = crate::data::load_cache();
+                }
                 self.thumbs.clear();
                 self.stale = true;
                 let text = match report.failed {
@@ -133,8 +188,13 @@ impl ColorSearch {
         })
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn poll_build(&mut self) -> Option<Event> {
+        None
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<Event> {
-        let event = self.poll_build();
+        let event = self.poll_loading().or(self.poll_build());
 
         let picked = if ui.available_width() >= SIDE_BY_SIDE_MIN_WIDTH {
             // Picker in a left panel; results fill the remaining space.
@@ -200,7 +260,20 @@ impl ColorSearch {
 
     /// Everything below/beside the picker: index status or the results grid.
     fn body(&mut self, ui: &mut egui::Ui) -> Option<Event> {
+        if self.loading.is_some() {
+            theme::card().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading Pokémon data…");
+                });
+            });
+            return None;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(build) = &self.build {
+            use std::sync::atomic::Ordering;
             let done = build.progress.done.load(Ordering::Relaxed);
             let total = build.progress.total.load(Ordering::Relaxed).max(1);
             theme::card().show(ui, |ui| {
@@ -212,10 +285,20 @@ impl ColorSearch {
                         .fill(theme::HIGHLIGHT),
                 );
             });
-            ui.ctx().request_repaint_after(Duration::from_millis(100));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
             return None;
         }
 
+        if let Some(error) = &self.load_error {
+            theme::card().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new(error).color(theme::ACCENT));
+            });
+            return None;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         if self.index.is_none() {
             let mut event = None;
             theme::card().show(ui, |ui| {
@@ -363,11 +446,11 @@ impl ColorSearch {
     }
 
     fn thumb(&mut self, ctx: &egui::Context, id: u32) -> Option<TextureHandle> {
-        let store = self.store.as_ref()?;
+        let sprites = self.sprites.as_ref()?;
         self.thumbs
             .entry(id)
             .or_insert_with(|| {
-                let bytes = std::fs::read(store.sprite_path(id)).ok()?;
+                let bytes = sprites.png(id)?;
                 let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
                 let size = [img.width() as usize, img.height() as usize];
                 let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());

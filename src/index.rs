@@ -8,20 +8,17 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::api::Client;
 use crate::color::{Lab, Rgb};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use cache::{BuildReport, Progress, Store};
 
 /// Bump when the palette algorithm changes so stale indexes get rebuilt.
 const FORMAT: u32 = 1;
-/// Concurrent sprite downloads. Polite to the host, still finishes in well under a minute.
-const WORKERS: usize = 8;
 /// Pixels with less alpha than this are background.
 const ALPHA_CUTOFF: u8 = 128;
 /// Palette entries kept per sprite. Classic sprites use ~16 colours; this
@@ -29,40 +26,6 @@ const ALPHA_CUTOFF: u8 = 128;
 const MAX_SWATCHES: usize = 64;
 /// Matches covering less of the sprite than this are dropped as noise.
 const MIN_SCORE: f32 = 0.02;
-
-pub struct Store {
-    root: PathBuf,
-}
-
-impl Store {
-    pub fn default_location() -> Result<Self> {
-        let root = dirs::cache_dir()
-            .context("no cache directory on this OS")?
-            .join("pokepicker");
-        Ok(Self { root })
-    }
-
-    pub fn sprite_path(&self, id: u32) -> PathBuf {
-        self.root.join("sprites").join(format!("{id}.png"))
-    }
-
-    fn index_path(&self) -> PathBuf {
-        self.root.join("index.json")
-    }
-
-    /// Cached sprite bytes, downloading on a miss. `None` if the pokemon has no sprite.
-    fn sprite(&self, client: &Client, id: u32) -> Result<Option<Vec<u8>>> {
-        let path = self.sprite_path(id);
-        if let Ok(bytes) = std::fs::read(&path) {
-            return Ok(Some(bytes));
-        }
-        let Some(bytes) = client.sprite_by_id(id)? else {
-            return Ok(None);
-        };
-        write_atomic(&path, &bytes)?;
-        Ok(Some(bytes))
-    }
-}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Swatch {
@@ -92,18 +55,6 @@ pub struct Match {
     pub closest: Rgb,
 }
 
-#[derive(Default)]
-pub struct Progress {
-    pub done: AtomicUsize,
-    pub total: AtomicUsize,
-}
-
-pub struct BuildReport {
-    pub index: Index,
-    /// Pokemon whose sprite couldn't be fetched or decoded; a rebuild retries them.
-    pub failed: usize,
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct Index {
     format: u32,
@@ -125,20 +76,9 @@ impl Index {
         index
     }
 
-    fn prepare(&mut self) {
-        self.labs = self
-            .entries
-            .iter()
-            .map(|e| e.palette.iter().map(|s| Lab::from_rgb(s.rgb)).collect())
-            .collect();
-    }
-
-    /// The saved index, or `None` if there isn't one (or it's from an older format).
-    pub fn load(store: &Store) -> Result<Option<Self>> {
-        let Ok(bytes) = std::fs::read(store.index_path()) else {
-            return Ok(None);
-        };
-        let mut index: Index = serde_json::from_slice(&bytes).context("corrupt index.json")?;
+    /// Parse a saved index, or `None` if it's from an older format.
+    pub fn from_json(bytes: &[u8]) -> Result<Option<Self>> {
+        let mut index: Index = serde_json::from_slice(bytes).context("corrupt index.json")?;
         if index.format != FORMAT {
             return Ok(None);
         }
@@ -146,42 +86,12 @@ impl Index {
         Ok(Some(index))
     }
 
-    fn save(&self, store: &Store) -> Result<()> {
-        write_atomic(&store.index_path(), &serde_json::to_vec(self)?)
-    }
-
-    /// Download any missing sprites, extract every palette, and save the index.
-    pub fn build(store: &Store, client: &Client, progress: &Progress) -> Result<BuildReport> {
-        let all = client.list_pokemon()?;
-        progress.total.store(all.len(), Ordering::Relaxed);
-
-        let next = AtomicUsize::new(0);
-        let entries = Mutex::new(Vec::with_capacity(all.len()));
-        let failed = AtomicUsize::new(0);
-
-        std::thread::scope(|s| {
-            for _ in 0..WORKERS {
-                s.spawn(|| {
-                    while let Some((id, name)) = all.get(next.fetch_add(1, Ordering::Relaxed)) {
-                        match index_one(store, client, *id, name) {
-                            Ok(Some(entry)) => entries.lock().unwrap().push(entry),
-                            Ok(None) => {}
-                            Err(_) => _ = failed.fetch_add(1, Ordering::Relaxed),
-                        }
-                        progress.done.fetch_add(1, Ordering::Relaxed);
-                    }
-                });
-            }
-        });
-
-        let mut entries = entries.into_inner().unwrap();
-        entries.sort_by_key(|e| e.id);
-        let index = Index::new(entries);
-        index.save(store)?;
-        Ok(BuildReport {
-            index,
-            failed: failed.into_inner(),
-        })
+    fn prepare(&mut self) {
+        self.labs = self
+            .entries
+            .iter()
+            .map(|e| e.palette.iter().map(|s| Lab::from_rgb(s.rgb)).collect())
+            .collect();
     }
 
     /// Pokemon whose sprites contain colours near `target`, best first;
@@ -228,19 +138,6 @@ impl Index {
     }
 }
 
-fn index_one(store: &Store, client: &Client, id: u32, name: &str) -> Result<Option<Entry>> {
-    let Some(bytes) = store.sprite(client, id)? else {
-        return Ok(None);
-    };
-    let (pixels, palette) = palette(&bytes)?;
-    Ok((pixels > 0).then(|| Entry {
-        id,
-        name: name.to_owned(),
-        pixels,
-        palette,
-    }))
-}
-
 /// Opaque pixel count and the sprite's colours, most common first.
 ///
 /// Near-identical colours (same top 5 bits per channel) are merged and
@@ -272,15 +169,139 @@ pub fn palette(png: &[u8]) -> Result<(u32, Vec<Swatch>)> {
     Ok((pixels, palette))
 }
 
-/// Write via a temp file so an interrupted build never leaves a truncated file.
-fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+/// The desktop sprite cache and index builder. Browsers have no file system
+/// or threads; the web build loads a pre-built bundle instead (see `sprite_pack`).
+#[cfg(not(target_arch = "wasm32"))]
+mod cache {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use anyhow::{Context, Result};
+
+    use super::{Entry, Index, palette};
+    use crate::api::Client;
+
+    /// Concurrent sprite downloads. Polite to the host, still finishes in well under a minute.
+    const WORKERS: usize = 8;
+
+    pub struct Store {
+        root: PathBuf,
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+
+    impl Store {
+        pub fn default_location() -> Result<Self> {
+            let root = dirs::cache_dir()
+                .context("no cache directory on this OS")?
+                .join("pokepicker");
+            Ok(Self { root })
+        }
+
+        pub fn sprite_path(&self, id: u32) -> PathBuf {
+            self.root.join("sprites").join(format!("{id}.png"))
+        }
+
+        fn index_path(&self) -> PathBuf {
+            self.root.join("index.json")
+        }
+
+        /// Cached sprite bytes, downloading on a miss. `None` if the pokemon has no sprite.
+        fn sprite(&self, client: &Client, id: u32) -> Result<Option<Vec<u8>>> {
+            let path = self.sprite_path(id);
+            if let Ok(bytes) = std::fs::read(&path) {
+                return Ok(Some(bytes));
+            }
+            let Some(bytes) = client.sprite_by_id(id)? else {
+                return Ok(None);
+            };
+            write_atomic(&path, &bytes)?;
+            Ok(Some(bytes))
+        }
+    }
+
+    #[derive(Default)]
+    pub struct Progress {
+        pub done: AtomicUsize,
+        pub total: AtomicUsize,
+    }
+
+    pub struct BuildReport {
+        pub index: Index,
+        /// Pokemon whose sprite couldn't be fetched or decoded; a rebuild retries them.
+        pub failed: usize,
+    }
+
+    impl Index {
+        /// The saved index, or `None` if there isn't one (or it's from an older format).
+        pub fn load(store: &Store) -> Result<Option<Self>> {
+            let Ok(bytes) = std::fs::read(store.index_path()) else {
+                return Ok(None);
+            };
+            Index::from_json(&bytes)
+        }
+
+        fn save(&self, store: &Store) -> Result<()> {
+            write_atomic(&store.index_path(), &serde_json::to_vec(self)?)
+        }
+
+        /// Download any missing sprites, extract every palette, and save the index.
+        pub fn build(store: &Store, client: &Client, progress: &Progress) -> Result<BuildReport> {
+            let all = client.list_pokemon()?;
+            progress.total.store(all.len(), Ordering::Relaxed);
+
+            let next = AtomicUsize::new(0);
+            let entries = Mutex::new(Vec::with_capacity(all.len()));
+            let failed = AtomicUsize::new(0);
+
+            std::thread::scope(|s| {
+                for _ in 0..WORKERS {
+                    s.spawn(|| {
+                        while let Some((id, name)) = all.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            match index_one(store, client, *id, name) {
+                                Ok(Some(entry)) => entries.lock().unwrap().push(entry),
+                                Ok(None) => {}
+                                Err(_) => _ = failed.fetch_add(1, Ordering::Relaxed),
+                            }
+                            progress.done.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                }
+            });
+
+            let mut entries = entries.into_inner().unwrap();
+            entries.sort_by_key(|e| e.id);
+            let index = Index::new(entries);
+            index.save(store)?;
+            Ok(BuildReport {
+                index,
+                failed: failed.into_inner(),
+            })
+        }
+    }
+
+    fn index_one(store: &Store, client: &Client, id: u32, name: &str) -> Result<Option<Entry>> {
+        let Some(bytes) = store.sprite(client, id)? else {
+            return Ok(None);
+        };
+        let (pixels, palette) = palette(&bytes)?;
+        Ok((pixels > 0).then(|| Entry {
+            id,
+            name: name.to_owned(),
+            pixels,
+            palette,
+        }))
+    }
+
+    /// Write via a temp file so an interrupted build never leaves a truncated file.
+    fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

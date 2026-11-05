@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pokepicker</title>
+
+    <!-- trunk: build only the GUI binary (src/bin/bundle is a desktop tool). -->
+    <link data-trunk rel="rust" data-bin="pokepicker" />
+    <!-- Bundled colour index and sprites, served at web-data/. -->
+    <link data-trunk rel="copy-dir" href="web-data" />
+
+    <style>
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #f7f3e6; /* theme::PAPER, shown before the app paints */
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="pokepicker"></canvas>
+  </body>
+</html>

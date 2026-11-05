@@ -1,7 +1,7 @@
-//! Thin blocking client for https://pokeapi.co/api/v2/
-//!
-//! Blocking is fine here: the GUI runs every request on a worker thread.
+//! PokeAPI (https://pokeapi.co/api/v2/) types and URLs, plus a blocking
+//! client for desktop tools. The GUI fetches via `ehttp` (see `fetch.rs`).
 
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -64,6 +64,7 @@ impl NamedResource {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Deserialize)]
 struct Page {
     results: Vec<NamedResource>,
@@ -74,11 +75,15 @@ pub struct Sprites {
     pub front_default: Option<String>,
 }
 
+/// Blocking client for the desktop index builder and CLI tools. The GUI's
+/// lookups go through `ehttp` instead, which also works in the browser.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::blocking::Client,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Client {
     pub fn new() -> Result<Self> {
         let http = reqwest::blocking::Client::builder()
