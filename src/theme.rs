@@ -12,14 +12,18 @@ pub const MUTED: Color32 = Color32::from_rgb(0x8a, 0x8d, 0xa3);
 pub const HIGHLIGHT: Color32 = Color32::from_rgb(0xff, 0xd9, 0x5a);
 pub const ACCENT: Color32 = Color32::from_rgb(0xe3, 0x50, 0x4a);
 pub const SKY: Color32 = Color32::from_rgb(0xcf, 0xe4, 0xff);
+/// Slider rails and scroll bars: a darker cream that reads on both PAPER and CARD.
+pub const TRACK: Color32 = Color32::from_rgb(0xdd, 0xd6, 0xc0);
 
 const ROUND: CornerRadius = CornerRadius::same(8);
+/// Border width of `card()`.
+pub const BORDER: f32 = 2.5;
 
 /// A white dialog-box style card with a thick navy border.
 pub fn card() -> egui::Frame {
     egui::Frame::new()
         .fill(CARD)
-        .stroke(Stroke::new(2.5, INK))
+        .stroke(Stroke::new(BORDER, INK))
         .corner_radius(ROUND)
         .inner_margin(Margin::same(14))
 }
@@ -57,6 +61,7 @@ pub fn apply(ctx: &egui::Context) {
         .into();
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        style.spacing.slider_rail_height = 8.0;
 
         let v = &mut style.visuals;
         *v = egui::Visuals::light();
@@ -88,6 +93,8 @@ pub fn apply(ctx: &egui::Context) {
             w.expansion = 0.0;
         }
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.5, MUTED);
+        // egui paints slider rails (and scroll bar handles) with this fill.
+        v.widgets.inactive.bg_fill = TRACK;
         v.widgets.hovered.weak_bg_fill = HIGHLIGHT;
         v.widgets.hovered.bg_fill = HIGHLIGHT;
         v.widgets.open.weak_bg_fill = HIGHLIGHT;

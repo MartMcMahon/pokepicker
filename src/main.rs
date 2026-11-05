@@ -6,7 +6,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("POKEPICKER")
-            .with_inner_size([820.0, 680.0]),
+            .with_inner_size([960.0, 760.0]),
         ..Default::default()
     };
     eframe::run_native(

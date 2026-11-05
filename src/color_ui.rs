@@ -17,6 +17,13 @@ use crate::theme;
 /// Result tiles shown at once; past this the matches are too weak to be interesting.
 const MAX_RESULTS: usize = 120;
 const TILE: f32 = 96.0;
+const TILE_MARGIN: i8 = 6;
+/// Side of the picker's saturation/value square when it has its own column.
+const PICKER_SIDE: f32 = 290.0;
+/// Smaller square when the window is too narrow for side-by-side columns.
+const PICKER_SIDE_STACKED: f32 = 250.0;
+/// Below this width the picker stacks above the results instead.
+const SIDE_BY_SIDE_MIN_WIDTH: f32 = 720.0;
 
 pub enum Event {
     /// The user picked a result; look it up.
@@ -127,21 +134,72 @@ impl ColorSearch {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<Event> {
-        let mut event = self.poll_build();
+        let event = self.poll_build();
 
+        let picked = if ui.available_width() >= SIDE_BY_SIDE_MIN_WIDTH {
+            // Picker in a left panel; results fill the remaining space.
+            egui::Panel::left("picker")
+                .exact_size(PICKER_SIDE + 44.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::new().inner_margin(egui::Margin {
+                    right: 12,
+                    ..Default::default()
+                }))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("picker")
+                        .show(ui, |ui| self.picker_card(ui, PICKER_SIDE, false));
+                });
+            self.body(ui)
+        } else {
+            self.picker_card(ui, PICKER_SIDE_STACKED, true);
+            ui.add_space(12.0);
+            self.body(ui)
+        };
+        picked.or(event)
+    }
+
+    /// The colour picker plus hex/closeness controls, in a card.
+    fn picker_card(&mut self, ui: &mut egui::Ui, side: f32, controls_beside: bool) {
         theme::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.horizontal_top(|ui| {
-                if color_picker_color32(ui, &mut self.target, Alpha::Opaque) {
-                    self.hex = to_hex(rgb(self.target));
-                    self.stale = true;
-                }
+            let picker = |ui: &mut egui::Ui, this: &mut Self| {
+                ui.scope(|ui| {
+                    // egui sizes its inline picker from these spacing values.
+                    ui.spacing_mut().slider_width = side;
+                    ui.spacing_mut().interact_size.y = 26.0;
+                    // Compact styling for the picker's own button row (format toggle,
+                    // copy, R/G/B). At the app's default size, "R 255 G 255 B 255" is
+                    // wider than the square and spills out of the column.
+                    ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let small = egui::FontId::proportional(14.0);
+                    let styles = &mut ui.style_mut().text_styles;
+                    styles.insert(egui::TextStyle::Button, small.clone());
+                    styles.insert(egui::TextStyle::Body, small);
+                    if color_picker_color32(ui, &mut this.target, Alpha::Opaque) {
+                        this.hex = to_hex(rgb(this.target));
+                        this.stale = true;
+                    }
+                });
+            };
+            if controls_beside {
+                ui.horizontal_top(|ui| {
+                    picker(ui, self);
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| self.controls(ui));
+                });
+            } else {
+                picker(ui, self);
                 ui.add_space(8.0);
-                ui.vertical(|ui| self.controls(ui));
-            });
+                self.controls(ui);
+            }
         });
-        ui.add_space(12.0);
+    }
 
+    /// Everything below/beside the picker: index status or the results grid.
+    fn body(&mut self, ui: &mut egui::Ui) -> Option<Event> {
         if let Some(build) = &self.build {
             let done = build.progress.done.load(Ordering::Relaxed);
             let total = build.progress.total.load(Ordering::Relaxed).max(1);
@@ -155,10 +213,11 @@ impl ColorSearch {
                 );
             });
             ui.ctx().request_repaint_after(Duration::from_millis(100));
-            return event;
+            return None;
         }
 
         if self.index.is_none() {
+            let mut event = None;
             theme::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label("To search by color, Pokepicker needs every sprite saved locally.");
@@ -181,20 +240,10 @@ impl ColorSearch {
             self.stale = false;
         }
 
-        let picked = self.results_grid(ui);
-        picked.map(Event::Open).or(event)
+        self.results_grid(ui).map(Event::Open)
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(120.0, 48.0), egui::Sense::hover());
-        ui.painter().rect(
-            rect,
-            6.0,
-            self.target,
-            egui::Stroke::new(2.5, theme::INK),
-            egui::StrokeKind::Inside,
-        );
-
         ui.horizontal(|ui| {
             ui.label(RichText::new("HEX").color(theme::MUTED));
             let edit = ui.add(
@@ -248,7 +297,9 @@ impl ColorSearch {
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
+                // Top-aligned so tiles of a row line up (`horizontal_wrapped` centres them).
+                let grid = egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true);
+                ui.with_layout(grid, |ui| {
                     for m in results.iter().take(MAX_RESULTS) {
                         if self.tile(ui, m).clicked() {
                             picked = Some(m.name.clone());
@@ -262,39 +313,47 @@ impl ColorSearch {
 
     fn tile(&mut self, ui: &mut egui::Ui, m: &Match) -> egui::Response {
         let thumb = self.thumb(ui.ctx(), m.id);
-        let frame = theme::card()
-            .inner_margin(egui::Margin::same(6))
-            .show(ui, |ui| {
-                ui.set_width(TILE);
-                ui.vertical_centered(|ui| {
-                    match thumb {
-                        Some(tex) => {
-                            ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(TILE, TILE)))
-                        }
-                        None => ui.allocate_response(egui::vec2(TILE, TILE), egui::Sense::hover()),
-                    };
-                    ui.add(
-                        egui::Label::new(RichText::new(m.name.to_uppercase()).small().strong())
-                            .truncate(),
-                    );
-                    ui.horizontal(|ui| {
-                        let c = m.closest;
-                        egui::color_picker::show_color(
-                            ui,
-                            Color32::from_rgb(c[0], c[1], c[2]),
-                            egui::vec2(14.0, 14.0),
+        // A Frame placed directly in a wrapping layout never wraps; reserving its
+        // width with `allocate_ui` first lets the layout move it to the next row.
+        let outer_width = TILE + 2.0 * (TILE_MARGIN as f32 + theme::BORDER);
+        let frame = ui.allocate_ui(egui::vec2(outer_width, 0.0), |ui| {
+            theme::card()
+                .inner_margin(egui::Margin::same(TILE_MARGIN))
+                .show(ui, |ui| {
+                    ui.set_width(TILE);
+                    ui.vertical_centered(|ui| {
+                        match thumb {
+                            Some(tex) => ui.add(
+                                egui::Image::new(&tex).fit_to_exact_size(egui::vec2(TILE, TILE)),
+                            ),
+                            None => {
+                                ui.allocate_response(egui::vec2(TILE, TILE), egui::Sense::hover())
+                            }
+                        };
+                        ui.add(
+                            egui::Label::new(RichText::new(m.name.to_uppercase()).small().strong())
+                                .truncate(),
                         );
-                        ui.small(format!("{:.0}%", m.coverage * 100.0));
+                        ui.horizontal(|ui| {
+                            let c = m.closest;
+                            egui::color_picker::show_color(
+                                ui,
+                                Color32::from_rgb(c[0], c[1], c[2]),
+                                egui::vec2(14.0, 14.0),
+                            );
+                            ui.small(format!("{:.0}%", m.coverage * 100.0));
+                        });
                     });
-                });
-            });
+                })
+                .response
+        });
+        let frame = frame.inner;
         let response = frame
-            .response
             .interact(egui::Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         if response.hovered() {
             ui.painter().rect_stroke(
-                frame.response.rect,
+                frame.rect,
                 8.0,
                 egui::Stroke::new(2.5, theme::ACCENT),
                 egui::StrokeKind::Inside,
