@@ -7,18 +7,21 @@ default-run = "pokepicker"
 
 [dependencies]
 anyhow = "1.0.104"
-eframe = "0.37.0"
 ehttp = "0.7.3"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
-# Desktop only: the sprite cache, index builder and CLI tools.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = "0.37.0"
+# Desktop only: the sprite cache, index builder and CLI tools.
 dirs = "7.0.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "rustls"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# The glow (WebGL) renderer instead of the default wgpu, which bundles a shader
+# compiler into the download. Desktop keeps eframe's defaults.
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow"] }
 wasm-bindgen = "0.2.130"
 wasm-bindgen-futures = "0.4.80"
 web-sys = { version = "0.3.107", features = ["Window", "Document", "HtmlCanvasElement"] }
@@ -27,3 +30,11 @@ web-sys = { version = "0.3.107", features = ["Window", "Document", "HtmlCanvasEl
 # crate stays at opt-level 0 so incremental rebuilds remain fast.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Size-optimised profile for the web build (`trunk build --release --cargo-profile web`):
+# a smaller download matters more there than peak speed.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
