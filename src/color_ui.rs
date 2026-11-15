@@ -15,12 +15,18 @@ use crate::theme;
 const MAX_RESULTS: usize = 120;
 const TILE: f32 = 96.0;
 const TILE_MARGIN: i8 = 6;
+/// Horizontal space a result tile's card takes around its sprite.
+const TILE_CHROME: f32 = 2.0 * (TILE_MARGIN as f32 + theme::BORDER);
 /// Side of the picker's saturation/value square when it has its own column.
 const PICKER_SIDE: f32 = 290.0;
 /// Smaller square when the window is too narrow for side-by-side columns.
 const PICKER_SIDE_STACKED: f32 = 250.0;
 /// Below this width the picker stacks above the results instead.
 const SIDE_BY_SIDE_MIN_WIDTH: f32 = 720.0;
+/// Below this width (phones) the hex/closeness controls go under the picker square.
+const CONTROLS_BESIDE_MIN_WIDTH: f32 = 520.0;
+/// Horizontal space `theme::card()` takes around its contents.
+const CARD_CHROME: f32 = 2.0 * (14.0 + theme::BORDER);
 
 pub enum Event {
     /// The user picked a result; look it up.
@@ -196,7 +202,8 @@ impl ColorSearch {
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<Event> {
         let event = self.poll_loading().or(self.poll_build());
 
-        let picked = if ui.available_width() >= SIDE_BY_SIDE_MIN_WIDTH {
+        let width = ui.available_width();
+        let picked = if width >= SIDE_BY_SIDE_MIN_WIDTH {
             // Picker in a left panel; results fill the remaining space.
             egui::Panel::left("picker")
                 .exact_size(PICKER_SIDE + 44.0)
@@ -211,11 +218,27 @@ impl ColorSearch {
                         .id_salt("picker")
                         .show(ui, |ui| self.picker_card(ui, PICKER_SIDE, false));
                 });
-            self.body(ui)
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .show(ui, |ui| self.body(ui))
+                .inner
         } else {
-            self.picker_card(ui, PICKER_SIDE_STACKED, true);
-            ui.add_space(12.0);
-            self.body(ui)
+            // One scroll for picker and results: on a phone the picker alone fills
+            // most of the screen, which would leave the results a sliver to scroll in.
+            let beside = width >= CONTROLS_BESIDE_MIN_WIDTH;
+            let side = if beside {
+                PICKER_SIDE_STACKED
+            } else {
+                (width - CARD_CHROME).min(PICKER_SIDE_STACKED)
+            };
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    self.picker_card(ui, side, beside);
+                    ui.add_space(12.0);
+                    self.body(ui)
+                })
+                .inner
         };
         picked.or(event)
     }
@@ -377,40 +400,37 @@ impl ColorSearch {
 
         let mut picked = None;
         let results = std::mem::take(&mut self.results);
-        egui::ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                // Top-aligned so tiles of a row line up (`horizontal_wrapped` centres them).
-                let grid = egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true);
-                ui.with_layout(grid, |ui| {
-                    for m in results.iter().take(MAX_RESULTS) {
-                        if self.tile(ui, m).clicked() {
-                            picked = Some(m.name.clone());
-                        }
-                    }
-                });
-            });
+        // Top-aligned so tiles of a row line up (`horizontal_wrapped` centres them).
+        let grid = egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true);
+        let side = tile_side(ui.available_width(), ui.spacing().item_spacing.x);
+        ui.with_layout(grid, |ui| {
+            for m in results.iter().take(MAX_RESULTS) {
+                if self.tile(ui, m, side).clicked() {
+                    picked = Some(m.name.clone());
+                }
+            }
+        });
         self.results = results;
         picked
     }
 
-    fn tile(&mut self, ui: &mut egui::Ui, m: &Match) -> egui::Response {
+    fn tile(&mut self, ui: &mut egui::Ui, m: &Match, side: f32) -> egui::Response {
         let thumb = self.thumb(ui.ctx(), m.id);
         // A Frame placed directly in a wrapping layout never wraps; reserving its
         // width with `allocate_ui` first lets the layout move it to the next row.
-        let outer_width = TILE + 2.0 * (TILE_MARGIN as f32 + theme::BORDER);
+        let outer_width = side + TILE_CHROME;
         let frame = ui.allocate_ui(egui::vec2(outer_width, 0.0), |ui| {
             theme::card()
                 .inner_margin(egui::Margin::same(TILE_MARGIN))
                 .show(ui, |ui| {
-                    ui.set_width(TILE);
+                    ui.set_width(side);
                     ui.vertical_centered(|ui| {
                         match thumb {
                             Some(tex) => ui.add(
-                                egui::Image::new(&tex).fit_to_exact_size(egui::vec2(TILE, TILE)),
+                                egui::Image::new(&tex).fit_to_exact_size(egui::vec2(side, side)),
                             ),
                             None => {
-                                ui.allocate_response(egui::vec2(TILE, TILE), egui::Sense::hover())
+                                ui.allocate_response(egui::vec2(side, side), egui::Sense::hover())
                             }
                         };
                         ui.add(
@@ -458,6 +478,14 @@ impl ColorSearch {
             })
             .clone()
     }
+}
+
+/// Sprite size for result tiles: close to `TILE`, but adjusted so a whole number
+/// of tiles fills `width` (otherwise a phone can be left with a tile-sized gap).
+fn tile_side(width: f32, gap: f32) -> f32 {
+    let columns = ((width + gap) / (TILE + TILE_CHROME + gap)).round().max(1.0);
+    // Floored so rounding never pushes the last tile onto the next row.
+    ((width + gap) / columns - gap - TILE_CHROME).floor()
 }
 
 fn rgb(c: Color32) -> Rgb {

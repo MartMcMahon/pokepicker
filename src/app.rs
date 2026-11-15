@@ -148,9 +148,12 @@ impl App {
     fn lookup(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("SEARCH").strong());
+            // Leave room for the FETCH button so the row fits on a phone.
+            let room = ui.available_width() - 130.0;
             let input = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
                     .hint_text("name or number")
+                    .desired_width(room.clamp(80.0, 280.0))
                     .margin(egui::vec2(8.0, 6.0)),
             );
             let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -180,7 +183,13 @@ impl App {
                 ui.label(RichText::new("No Pokémon loaded yet. Try a search!").color(theme::MUTED));
                 return;
             };
-            ui.horizontal_top(|ui| {
+            // Stats beside the sprite, or under it when there's no room (phones).
+            let layout = if ui.available_width() >= 420.0 {
+                egui::Layout::left_to_right(egui::Align::Min)
+            } else {
+                egui::Layout::top_down(egui::Align::Min)
+            };
+            ui.with_layout(layout, |ui| {
                 // Sprites are 96x96 pixel art; scale up with nearest-neighbour.
                 egui::Frame::new()
                     .fill(theme::SKY)
